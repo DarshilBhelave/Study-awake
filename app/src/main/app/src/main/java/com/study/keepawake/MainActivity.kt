@@ -13,8 +13,6 @@ import android.view.Gravity
 import android.widget.*
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.core.app.ActivityCompat
-import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleService
 import com.google.mlkit.vision.common.InputImage
@@ -25,105 +23,135 @@ import java.util.concurrent.Executors
 class MainActivity : Activity() {
 
     private var intervalSeconds = 20
+    private lateinit var statusBox: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        val layout = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            setBackgroundColor(Color.parseColor("#121212"))
-            setPadding(64, 64, 64, 64)
+        // Global crash catcher so the app never closes unexpectedly
+        Thread.setDefaultUncaughtExceptionHandler { _, throwable ->
+            Looper.prepare()
+            Toast.makeText(applicationContext, "Crash Error: ${throwable.message}", Toast.LENGTH_LONG).show()
+            Looper.loop()
         }
 
-        val title = TextView(this).apply {
-            text = "StudyAwake"
-            textSize = 28f
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            setPadding(0, 0, 0, 24)
-        }
+        try {
+            val layout = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                setBackgroundColor(Color.parseColor("#121212"))
+                setPadding(60, 60, 60, 60)
+            }
 
-        val subtitle = TextView(this).apply {
-            text = "Checks front camera periodically while you write assignments and keeps your screen awake."
-            textSize = 15f
-            setTextColor(Color.LTGRAY)
-            gravity = Gravity.CENTER
-            setPadding(0, 0, 0, 64)
-        }
+            val title = TextView(this).apply {
+                text = "StudyAwake"
+                textSize = 26f
+                setTextColor(Color.WHITE)
+                gravity = Gravity.CENTER
+                setPadding(0, 0, 0, 20)
+            }
 
-        val intervalLabel = TextView(this).apply {
-            text = "Check Camera Every: 20 seconds"
-            textSize = 16f
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            setPadding(0, 0, 0, 24)
-        }
+            statusBox = TextView(this).apply {
+                text = "Status: Ready\nChecks front camera while you write assignments."
+                textSize = 14f
+                setTextColor(Color.LTGRAY)
+                gravity = Gravity.CENTER
+                setPadding(0, 0, 0, 50)
+            }
 
-        val seekBar = SeekBar(this).apply {
-            max = 50
-            progress = 10
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(s: SeekBar?, p: Int, b: Boolean) {
-                    intervalSeconds = p + 10
-                    intervalLabel.text = "Check Camera Every: $intervalSeconds seconds"
-                }
-                override fun onStartTrackingTouch(s: SeekBar?) {}
-                override fun onStopTrackingTouch(s: SeekBar?) {}
-            })
-        }
+            val intervalLabel = TextView(this).apply {
+                text = "Check Camera Every: 20 seconds"
+                textSize = 16f
+                setTextColor(Color.WHITE)
+                gravity = Gravity.CENTER
+                setPadding(0, 0, 0, 20)
+            }
 
-        val startBtn = Button(this).apply {
-            text = "START ASSIGNMENT MODE"
-            setOnClickListener {
-                if (hasPermissions()) {
-                    try {
-                        val intent = Intent(this@MainActivity, KeepAwakeService::class.java)
-                        intent.putExtra("INTERVAL", intervalSeconds * 1000L)
-                        ContextCompat.startForegroundService(this@MainActivity, intent)
-                        Toast.makeText(this@MainActivity, "StudyAwake Running! Switch to your assignment now.", Toast.LENGTH_LONG).show()
-                    } catch (e: Exception) {
-                        Toast.makeText(this@MainActivity, "Error: ${e.message}", Toast.LENGTH_LONG).show()
+            val seekBar = SeekBar(this).apply {
+                max = 50
+                progress = 10
+                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(s: SeekBar?, p: Int, b: Boolean) {
+                        intervalSeconds = p + 10
+                        intervalLabel.text = "Check Camera Every: $intervalSeconds seconds"
                     }
-                } else {
-                    requestPermissions()
+                    override fun onStartTrackingTouch(s: SeekBar?) {}
+                    override fun onStopTrackingTouch(s: SeekBar?) {}
+                })
+            }
+
+            val startBtn = Button(this).apply {
+                text = "START ASSIGNMENT MODE"
+                setOnClickListener {
+                    try {
+                        if (hasPermissions()) {
+                            val intent = Intent(this@MainActivity, KeepAwakeService::class.java)
+                            intent.putExtra("INTERVAL", intervalSeconds * 1000L)
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                startForegroundService(intent)
+                            } else {
+                                startService(intent)
+                            }
+                            statusBox.text = "Status: RUNNING!\nYou can minimize this app and open your assignment now."
+                            statusBox.setTextColor(Color.GREEN)
+                        } else {
+                            requestAppPermissions()
+                        }
+                    } catch (e: Exception) {
+                        statusBox.text = "Start Error:\n${e.javaClass.simpleName}: ${e.message}"
+                        statusBox.setTextColor(Color.RED)
+                    }
                 }
             }
-        }
 
-        val stopBtn = Button(this).apply {
-            text = "STOP SERVICE"
-            setOnClickListener {
-                stopService(Intent(this@MainActivity, KeepAwakeService::class.java))
-                Toast.makeText(this@MainActivity, "StudyAwake Stopped.", Toast.LENGTH_SHORT).show()
+            val stopBtn = Button(this).apply {
+                text = "STOP SERVICE"
+                setOnClickListener {
+                    try {
+                        stopService(Intent(this@MainActivity, KeepAwakeService::class.java))
+                        statusBox.text = "Status: Stopped."
+                        statusBox.setTextColor(Color.LTGRAY)
+                    } catch (e: Exception) {
+                        statusBox.text = "Stop Error: ${e.message}"
+                    }
+                }
             }
+
+            layout.addView(title)
+            layout.addView(statusBox)
+            layout.addView(intervalLabel)
+            layout.addView(seekBar)
+            layout.addView(startBtn)
+            layout.addView(stopBtn)
+
+            setContentView(layout)
+            if (!hasPermissions()) requestAppPermissions()
+
+        } catch (e: Exception) {
+            val errView = TextView(this).apply {
+                text = "Startup Error:\n${e.stackTraceToString()}"
+                setTextColor(Color.WHITE)
+                setBackgroundColor(Color.BLACK)
+                setPadding(40, 40, 40, 40)
+            }
+            setContentView(errView)
         }
-
-        layout.addView(title)
-        layout.addView(subtitle)
-        layout.addView(intervalLabel)
-        layout.addView(seekBar)
-        layout.addView(startBtn)
-        layout.addView(stopBtn)
-
-        setContentView(layout)
-        if (!hasPermissions()) requestPermissions()
     }
 
     private fun hasPermissions(): Boolean {
-        val cam = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
-        val notif = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        val cam = checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+        val notif = if (Build.VERSION.SDK_INT >= 33) {
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
         } else true
         return cam && notif
     }
 
-    private fun requestPermissions() {
+    private fun requestAppPermissions() {
         val perms = mutableListOf(Manifest.permission.CAMERA)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        if (Build.VERSION.SDK_INT >= 33) {
             perms.add(Manifest.permission.POST_NOTIFICATIONS)
         }
-        ActivityCompat.requestPermissions(this, perms.toTypedArray(), 101)
+        requestPermissions(perms.toTypedArray(), 101)
     }
 }
 
@@ -154,14 +182,11 @@ class KeepAwakeService : LifecycleService() {
         super.onStartCommand(intent, flags, startId)
         checkIntervalMs = intent?.getLongExtra("INTERVAL", 20000L) ?: 20000L
         try {
+            val notif = buildNotification("Active: Keeping screen awake")
             if (Build.VERSION.SDK_INT >= 34) {
-                startForeground(
-                    1,
-                    buildNotification("Active: Keeping screen awake"),
-                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
-                )
+                startForeground(1, notif, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA)
             } else {
-                startForeground(1, buildNotification("Active: Keeping screen awake"))
+                startForeground(1, notif)
             }
             acquireWakeLock()
             handler.removeCallbacks(checkRunnable)
@@ -174,22 +199,26 @@ class KeepAwakeService : LifecycleService() {
 
     @Suppress("DEPRECATION")
     private fun acquireWakeLock() {
-        if (wakeLock == null) {
-            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-            wakeLock = pm.newWakeLock(
-                PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
-                "StudyAwake::ScreenLock"
-            )
-        }
-        if (wakeLock?.isHeld == false) {
-            wakeLock?.acquire(15 * 60 * 1000L)
-        }
+        try {
+            if (wakeLock == null) {
+                val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                wakeLock = pm.newWakeLock(
+                    PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                    "StudyAwake::ScreenLock"
+                )
+            }
+            if (wakeLock?.isHeld == false) {
+                wakeLock?.acquire(15 * 60 * 1000L)
+            }
+        } catch (_: Exception) {}
     }
 
     private fun releaseWakeLock() {
-        if (wakeLock?.isHeld == true) {
-            wakeLock?.release()
-        }
+        try {
+            if (wakeLock?.isHeld == true) {
+                wakeLock?.release()
+            }
+        } catch (_: Exception) {}
     }
 
     @SuppressLint("UnsafeOptInUsageError")
@@ -240,29 +269,35 @@ class KeepAwakeService : LifecycleService() {
                 }
 
                 cameraProvider.unbindAll()
-                cameraProvider.bindToLifecycle(
-                    this,
-                    CameraSelector.DEFAULT_FRONT_CAMERA,
-                    imageAnalysis
-                )
+                cameraProvider.bindToLifecycle(this, CameraSelector.DEFAULT_FRONT_CAMERA, imageAnalysis)
             } catch (e: Exception) {
-                updateNotification("Camera busy or in use.")
+                updateNotification("Camera busy or blocked.")
             }
         }, ContextCompat.getMainExecutor(this))
     }
 
     private fun updateNotification(statusText: String) {
-        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        nm.notify(1, buildNotification(statusText))
+        try {
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            nm.notify(1, buildNotification(statusText))
+        } catch (_: Exception) {}
     }
 
     private fun buildNotification(text: String): Notification {
         val channelId = "study_awake_channel"
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(channelId, "StudyAwake Service", NotificationManager.IMPORTANCE_LOW)
-            (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(channel)
+            nm.createNotificationChannel(channel)
+            return Notification.Builder(this, channelId)
+                .setContentTitle("StudyAwake Assignment Mode")
+                .setContentText(text)
+                .setSmallIcon(android.R.drawable.ic_menu_camera)
+                .setOngoing(true)
+                .build()
         }
-        return NotificationCompat.Builder(this, channelId)
+        @Suppress("DEPRECATION")
+        return Notification.Builder(this)
             .setContentTitle("StudyAwake Assignment Mode")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_menu_camera)
@@ -277,5 +312,3 @@ class KeepAwakeService : LifecycleService() {
         super.onDestroy()
     }
 }
-
-            
