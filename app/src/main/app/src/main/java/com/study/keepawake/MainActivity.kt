@@ -7,9 +7,14 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.PixelFormat
+import android.net.Uri
 import android.os.*
+import android.provider.Settings
 import android.util.Size
 import android.view.Gravity
+import android.view.View
+import android.view.WindowManager
 import android.widget.*
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -28,7 +33,6 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Global crash catcher so the app never closes unexpectedly
         Thread.setDefaultUncaughtExceptionHandler { _, throwable ->
             Looper.prepare()
             Toast.makeText(applicationContext, "Crash Error: ${throwable.message}", Toast.LENGTH_LONG).show()
@@ -143,10 +147,16 @@ class MainActivity : Activity() {
         val notif = if (Build.VERSION.SDK_INT >= 33) {
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
         } else true
-        return cam && notif
+        val overlay = Settings.canDrawOverlays(this)
+        return cam && notif && overlay
     }
 
     private fun requestAppPermissions() {
+        if (!Settings.canDrawOverlays(this)) {
+            Toast.makeText(this, "Please allow 'Appear on top' to keep screen awake!", Toast.LENGTH_LONG).show()
+            val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
+            startActivity(intent)
+        }
         val perms = mutableListOf(Manifest.permission.CAMERA)
         if (Build.VERSION.SDK_INT >= 33) {
             perms.add(Manifest.permission.POST_NOTIFICATIONS)
@@ -158,6 +168,8 @@ class MainActivity : Activity() {
 class KeepAwakeService : LifecycleService() {
 
     private var wakeLock: PowerManager.WakeLock? = null
+    private var windowManager: WindowManager? = null
+    private var overlayView: View? = null
     private val handler = Handler(Looper.getMainLooper())
     private val cameraExecutor = Executors.newSingleThreadExecutor()
     private var checkIntervalMs = 20000L
@@ -199,6 +211,7 @@ class KeepAwakeService : LifecycleService() {
 
     @Suppress("DEPRECATION")
     private fun acquireWakeLock() {
+        // 1. Traditional WakeLock (Often ignored by Samsung)
         try {
             if (wakeLock == null) {
                 val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -211,12 +224,37 @@ class KeepAwakeService : LifecycleService() {
                 wakeLock?.acquire(15 * 60 * 1000L)
             }
         } catch (_: Exception) {}
+
+        // 2. The Samsung Override: 1-Pixel Invisible Overlay
+        try {
+            if (overlayView == null && Settings.canDrawOverlays(this)) {
+                windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+                overlayView = View(this).apply { setBackgroundColor(Color.TRANSPARENT) }
+                val params = WindowManager.LayoutParams(
+                    1, 1,
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON, // The magic unbreakable flag
+                    PixelFormat.TRANSPARENT
+                )
+                params.gravity = Gravity.TOP or Gravity.START
+                windowManager?.addView(overlayView, params)
+            }
+        } catch (_: Exception) {}
     }
 
     private fun releaseWakeLock() {
         try {
             if (wakeLock?.isHeld == true) {
                 wakeLock?.release()
+            }
+        } catch (_: Exception) {}
+
+        try {
+            if (overlayView != null) {
+                windowManager?.removeView(overlayView)
+                overlayView = null
             }
         } catch (_: Exception) {}
     }
