@@ -5,15 +5,22 @@ import android.annotation.SuppressLint
 import android.app.*
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.media.AudioAttributes
+import android.media.Ringtone
+import android.media.RingtoneManager
 import android.net.Uri
 import android.os.*
 import android.provider.Settings
+import android.service.quicksettings.Tile
+import android.service.quicksettings.TileService
 import android.util.Size
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.*
 import androidx.camera.core.*
@@ -21,17 +28,24 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleService
 import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.face.Face
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
+import com.google.mlkit.vision.face.FaceLandmark
+import java.nio.ByteBuffer
 import java.util.concurrent.Executors
+import kotlin.math.abs
+import kotlin.math.hypot
 
 class MainActivity : Activity() {
 
     private var intervalSeconds = 20
     private lateinit var statusBox: TextView
+    private lateinit var prefs: SharedPreferences
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        prefs = getSharedPreferences("StudyAwakePrefs", Context.MODE_PRIVATE)
 
         Thread.setDefaultUncaughtExceptionHandler { _, throwable ->
             Looper.prepare()
@@ -40,35 +54,37 @@ class MainActivity : Activity() {
         }
 
         try {
+            val scrollView = ScrollView(this).apply {
+                setBackgroundColor(Color.parseColor("#121212"))
+            }
+
             val layout = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
-                gravity = Gravity.CENTER
-                setBackgroundColor(Color.parseColor("#121212"))
-                setPadding(60, 60, 60, 60)
+                gravity = Gravity.CENTER_HORIZONTAL
+                setPadding(50, 40, 50, 60)
             }
 
             val title = TextView(this).apply {
-                text = "StudyAwake"
+                text = "StudyAwake Pro"
                 textSize = 26f
-                setTextColor(Color.WHITE)
+                setTextColor(Color.parseColor("#00E676"))
                 gravity = Gravity.CENTER
-                setPadding(0, 0, 0, 20)
+                setPadding(0, 0, 0, 10)
             }
 
             statusBox = TextView(this).apply {
-                text = "Status: Ready\nChecks front camera while you write assignments."
-                textSize = 14f
+                text = "Status: Ready\nConfigure security and display modes below."
+                textSize = 13f
                 setTextColor(Color.LTGRAY)
                 gravity = Gravity.CENTER
-                setPadding(0, 0, 0, 50)
+                setPadding(0, 0, 0, 30)
             }
 
             val intervalLabel = TextView(this).apply {
-                text = "Check Camera Every: 20 seconds"
-                textSize = 16f
+                text = "Scan Interval: 20 seconds"
+                textSize = 15f
                 setTextColor(Color.WHITE)
-                gravity = Gravity.CENTER
-                setPadding(0, 0, 0, 20)
+                setPadding(0, 0, 0, 10)
             }
 
             val seekBar = SeekBar(this).apply {
@@ -77,33 +93,67 @@ class MainActivity : Activity() {
                 setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                     override fun onProgressChanged(s: SeekBar?, p: Int, b: Boolean) {
                         intervalSeconds = p + 10
-                        intervalLabel.text = "Check Camera Every: $intervalSeconds seconds"
+                        intervalLabel.text = "Scan Interval: $intervalSeconds seconds"
                     }
                     override fun onStartTrackingTouch(s: SeekBar?) {}
                     override fun onStopTrackingTouch(s: SeekBar?) {}
                 })
             }
 
-            val startBtn = Button(this).apply {
-                text = "START ASSIGNMENT MODE"
+            // Toggles
+            val warmSwitch = Switch(this).apply {
+                text = "Dynamic Ambient Warmth & Dim"
+                setTextColor(Color.WHITE)
+                isChecked = prefs.getBoolean("ENABLE_WARMTH", true)
+                setOnCheckedChangeListener { _, checked ->
+                    prefs.edit().putBoolean("ENABLE_WARMTH", checked).apply()
+                }
+            }
+
+            val privacySwitch = Switch(this).apply {
+                text = "Intruder Screen Saver Shield"
+                setTextColor(Color.WHITE)
+                isChecked = prefs.getBoolean("ENABLE_PRIVACY", false)
+                setOnCheckedChangeListener { _, checked ->
+                    prefs.edit().putBoolean("ENABLE_PRIVACY", checked).apply()
+                }
+            }
+
+            val calibrateBtn = Button(this).apply {
+                text = "Calibrate Primary Face"
                 setOnClickListener {
-                    try {
-                        if (hasPermissions()) {
-                            val intent = Intent(this@MainActivity, KeepAwakeService::class.java)
-                            intent.putExtra("INTERVAL", intervalSeconds * 1000L)
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                                startForegroundService(intent)
-                            } else {
-                                startService(intent)
-                            }
-                            statusBox.text = "Status: RUNNING!\nYou can minimize this app and open your assignment now."
-                            statusBox.setTextColor(Color.GREEN)
-                        } else {
-                            requestAppPermissions()
+                    prefs.edit().putBoolean("TRIGGER_CALIBRATE", true).apply()
+                    Toast.makeText(this@MainActivity, "Look straight at front camera on next check!", Toast.LENGTH_LONG).show()
+                }
+            }
+
+            val alarmSwitch = Switch(this).apply {
+                text = "Sleep Detection: Sound Alarm"
+                setTextColor(Color.WHITE)
+                isChecked = prefs.getBoolean("ENABLE_ALARM", true)
+                setOnCheckedChangeListener { _, checked ->
+                    prefs.edit().putBoolean("ENABLE_ALARM", checked).apply()
+                }
+            }
+
+            val startBtn = Button(this).apply {
+                text = "START STUDY SYSTEM"
+                setBackgroundColor(Color.parseColor("#00E676"))
+                setTextColor(Color.BLACK)
+                setOnClickListener {
+                    if (hasPermissions()) {
+                        val intent = Intent(this@MainActivity, KeepAwakeService::class.java).apply {
+                            putExtra("INTERVAL", intervalSeconds * 1000L)
                         }
-                    } catch (e: Exception) {
-                        statusBox.text = "Start Error:\n${e.javaClass.simpleName}: ${e.message}"
-                        statusBox.setTextColor(Color.RED)
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            startForegroundService(intent)
+                        } else {
+                            startService(intent)
+                        }
+                        statusBox.text = "Status: RUNNING\nProtected by StudyAwake AI."
+                        statusBox.setTextColor(Color.GREEN)
+                    } else {
+                        requestAppPermissions()
                     }
                 }
             }
@@ -111,13 +161,9 @@ class MainActivity : Activity() {
             val stopBtn = Button(this).apply {
                 text = "STOP SERVICE"
                 setOnClickListener {
-                    try {
-                        stopService(Intent(this@MainActivity, KeepAwakeService::class.java))
-                        statusBox.text = "Status: Stopped."
-                        statusBox.setTextColor(Color.LTGRAY)
-                    } catch (e: Exception) {
-                        statusBox.text = "Stop Error: ${e.message}"
-                    }
+                    stopService(Intent(this@MainActivity, KeepAwakeService::class.java))
+                    statusBox.text = "Status: Stopped."
+                    statusBox.setTextColor(Color.LTGRAY)
                 }
             }
 
@@ -125,10 +171,21 @@ class MainActivity : Activity() {
             layout.addView(statusBox)
             layout.addView(intervalLabel)
             layout.addView(seekBar)
+            layout.addView(createSpacer(20))
+            layout.addView(warmSwitch)
+            layout.addView(createSpacer(10))
+            layout.addView(privacySwitch)
+            layout.addView(calibrateBtn)
+            layout.addView(createSpacer(10))
+            layout.addView(alarmSwitch)
+            layout.addView(createSpacer(30))
             layout.addView(startBtn)
+            layout.addView(createSpacer(10))
             layout.addView(stopBtn)
 
-            setContentView(layout)
+            scrollView.addView(layout)
+            setContentView(scrollView)
+
             if (!hasPermissions()) requestAppPermissions()
 
         } catch (e: Exception) {
@@ -139,6 +196,12 @@ class MainActivity : Activity() {
                 setPadding(40, 40, 40, 40)
             }
             setContentView(errView)
+        }
+    }
+
+    private fun createSpacer(heightDp: Int): View {
+        return View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, heightDp)
         }
     }
 
@@ -153,7 +216,7 @@ class MainActivity : Activity() {
 
     private fun requestAppPermissions() {
         if (!Settings.canDrawOverlays(this)) {
-            Toast.makeText(this, "Please allow 'Appear on top' to keep screen awake!", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Allow 'Appear on top' for display tints & wake lock!", Toast.LENGTH_LONG).show()
             val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
             startActivity(intent)
         }
@@ -167,18 +230,31 @@ class MainActivity : Activity() {
 
 class KeepAwakeService : LifecycleService() {
 
+    companion object {
+        var isRunning = false
+    }
+
     private var wakeLock: PowerManager.WakeLock? = null
     private var windowManager: WindowManager? = null
-    private var overlayView: View? = null
+    private var overlayFilterView: View? = null
+    private var privacyShieldView: View? = null
+
     private val handler = Handler(Looper.getMainLooper())
     private val cameraExecutor = Executors.newSingleThreadExecutor()
+    private lateinit var prefs: SharedPreferences
+
+    private var baseIntervalMs = 20000L
     private var checkIntervalMs = 20000L
     private var missedDetections = 0
+    private var consecutiveSleepChecks = 0
+    private var ringtone: Ringtone? = null
 
     private val detector by lazy {
         val options = FaceDetectorOptions.Builder()
             .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
-            .setMinFaceSize(0.10f)
+            .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
+            .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
+            .setMinFaceSize(0.12f)
             .build()
         FaceDetection.getClient(options)
     }
@@ -192,18 +268,23 @@ class KeepAwakeService : LifecycleService() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
-        checkIntervalMs = intent?.getLongExtra("INTERVAL", 20000L) ?: 20000L
+        isRunning = true
+        prefs = getSharedPreferences("StudyAwakePrefs", Context.MODE_PRIVATE)
+        baseIntervalMs = intent?.getLongExtra("INTERVAL", 20000L) ?: 20000L
+        checkIntervalMs = baseIntervalMs
+
         try {
-            val notif = buildNotification("Active: Keeping screen awake")
+            val notif = buildNotification("Monitoring presence & ambient light")
             if (Build.VERSION.SDK_INT >= 34) {
                 startForeground(1, notif, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA)
             } else {
                 startForeground(1, notif)
             }
             acquireWakeLock()
+            setupOverlayViews()
             handler.removeCallbacks(checkRunnable)
             handler.post(checkRunnable)
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             stopSelf()
         }
         return START_STICKY
@@ -211,7 +292,6 @@ class KeepAwakeService : LifecycleService() {
 
     @Suppress("DEPRECATION")
     private fun acquireWakeLock() {
-        // 1. Traditional WakeLock (Often ignored by Samsung)
         try {
             if (wakeLock == null) {
                 val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -224,24 +304,6 @@ class KeepAwakeService : LifecycleService() {
                 wakeLock?.acquire(15 * 60 * 1000L)
             }
         } catch (_: Exception) {}
-
-        // 2. The Samsung Override: 1-Pixel Invisible Overlay
-        try {
-            if (overlayView == null && Settings.canDrawOverlays(this)) {
-                windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
-                overlayView = View(this).apply { setBackgroundColor(Color.TRANSPARENT) }
-                val params = WindowManager.LayoutParams(
-                    1, 1,
-                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON, // The magic unbreakable flag
-                    PixelFormat.TRANSPARENT
-                )
-                params.gravity = Gravity.TOP or Gravity.START
-                windowManager?.addView(overlayView, params)
-            }
-        } catch (_: Exception) {}
     }
 
     private fun releaseWakeLock() {
@@ -250,13 +312,61 @@ class KeepAwakeService : LifecycleService() {
                 wakeLock?.release()
             }
         } catch (_: Exception) {}
+    }
 
-        try {
-            if (overlayView != null) {
-                windowManager?.removeView(overlayView)
-                overlayView = null
+    private fun setupOverlayViews() {
+        if (!Settings.canDrawOverlays(this)) return
+        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+
+        // Tint / Warmth View
+        if (overlayFilterView == null) {
+            overlayFilterView = View(this).apply {
+                setBackgroundColor(Color.TRANSPARENT)
             }
-        } catch (_: Exception) {}
+            val params = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
+                PixelFormat.TRANSLUCENT
+            )
+            params.gravity = Gravity.TOP or Gravity.START
+            windowManager?.addView(overlayFilterView, params)
+        }
+
+        // Intruder Screen Saver Shield View
+        if (privacyShieldView == null) {
+            privacyShieldView = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                setBackgroundColor(Color.BLACK)
+                visibility = View.GONE
+
+                val text = TextView(this@KeepAwakeService).apply {
+                    text = "🔒 Screen Shield Active\nTap to Dismiss"
+                    textSize = 20f
+                    setTextColor(Color.WHITE)
+                    gravity = Gravity.CENTER
+                }
+                addView(text)
+                setOnClickListener {
+                    visibility = View.GONE
+                }
+            }
+
+            val shieldParams = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                PixelFormat.TRANSLUCENT
+            )
+            windowManager?.addView(privacyShieldView, shieldParams)
+        }
     }
 
     @SuppressLint("UnsafeOptInUsageError")
@@ -277,25 +387,20 @@ class KeepAwakeService : LifecycleService() {
                         imageProxy.close()
                         return@setAnalyzer
                     }
+
                     val mediaImage = imageProxy.image
                     if (mediaImage != null) {
                         analyzed = true
-                        val image = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
-                        detector.process(image)
+
+                        // 1. Calculate Ambient Room Illuminance (Luma Y-Plane)
+                        val yPlane = mediaImage.planes[0].buffer
+                        val ambientLuma = calculateAverageLuma(yPlane, mediaImage.width, mediaImage.height)
+                        handler.post { applyAmbientDisplayAdjustment(ambientLuma) }
+
+                        val inputImage = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
+                        detector.process(inputImage)
                             .addOnSuccessListener { faces ->
-                                if (faces.isNotEmpty()) {
-                                    missedDetections = 0
-                                    acquireWakeLock()
-                                    updateNotification("You're here! Screen locked awake.")
-                                } else {
-                                    missedDetections++
-                                    if (missedDetections >= 2) {
-                                        releaseWakeLock()
-                                        updateNotification("Away (${missedDetections}x) - Letting screen sleep.")
-                                    } else {
-                                        updateNotification("Missed 1 check - Rechecking soon...")
-                                    }
-                                }
+                                processFaceDetections(faces)
                             }
                             .addOnCompleteListener {
                                 imageProxy.close()
@@ -308,16 +413,179 @@ class KeepAwakeService : LifecycleService() {
 
                 cameraProvider.unbindAll()
                 cameraProvider.bindToLifecycle(this, CameraSelector.DEFAULT_FRONT_CAMERA, imageAnalysis)
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 updateNotification("Camera busy or blocked.")
             }
         }, ContextCompat.getMainExecutor(this))
     }
 
-    private fun updateNotification(statusText: String) {
+    private fun calculateAverageLuma(buffer: ByteBuffer, width: Int, height: Int): Int {
+        buffer.rewind()
+        var sum = 0L
+        var count = 0
+        val step = 16 // Sub-sample every 16th pixel to maintain 0ms latency
+        val limit = buffer.remaining()
+        var i = 0
+        while (i < limit) {
+            sum += (buffer.get(i).toInt() and 0xFF)
+            count++
+            i += step
+        }
+        return if (count > 0) (sum / count).toInt() else 128
+    }
+
+    private fun applyAmbientDisplayAdjustment(luma: Int) {
+        if (!prefs.getBoolean("ENABLE_WARMTH", true) || overlayFilterView == null) {
+            overlayFilterView?.setBackgroundColor(Color.TRANSPARENT)
+            return
+        }
+
+        // Color coding: #AARRGGBB
+        val filterColor = when {
+            luma < 45 -> Color.argb(85, 255, 140, 0)   // Dark room: Heavy Amber Warmth + software dim
+            luma < 120 -> Color.argb(40, 255, 165, 0)  // Medium room: Balanced Warmth
+            luma < 190 -> Color.TRANSPARENT             // Well-lit: Clear
+            else -> Color.argb(20, 0, 0, 0)             // Extreme glare: Sub-tint clear
+        }
+        overlayFilterView?.setBackgroundColor(filterColor)
+    }
+
+    private fun processFaceDetections(faces: List<Face>) {
+        if (faces.isEmpty()) {
+            missedDetections++
+            consecutiveSleepChecks = 0
+            stopAlarm()
+            releaseWakeLock()
+
+            // Progressive Battery Saver
+            if (missedDetections >= 62) {
+                checkIntervalMs = 60 * 60 * 1000L
+                updateNotification("Away a long time. Next check in 1 hr.")
+            } else if (missedDetections >= 50) {
+                checkIntervalMs = 5 * 60 * 1000L
+                updateNotification("Away. Battery saver: checking every 5 mins.")
+            } else if (missedDetections >= 2) {
+                checkIntervalMs = baseIntervalMs
+                updateNotification("Away (${missedDetections}x) - Letting screen sleep.")
+            }
+            return
+        }
+
+        // Reset presence timers
+        missedDetections = 0
+        checkIntervalMs = baseIntervalMs
+        acquireWakeLock()
+
+        val primaryFace = faces[0]
+
+        // Calibration Trigger Check
+        if (prefs.getBoolean("TRIGGER_CALIBRATE", false)) {
+            calibrateFaceProfile(primaryFace)
+            prefs.edit().putBoolean("TRIGGER_CALIBRATE", false).apply()
+            handler.post { Toast.makeText(this, "Face calibration saved!", Toast.LENGTH_SHORT).show() }
+        }
+
+        // 2. Intruder Detection / Multiple Face Protection
+        val privacyEnabled = prefs.getBoolean("ENABLE_PRIVACY", false)
+        if (privacyEnabled) {
+            val isIntruderPresent = faces.size > 1 || !isRecognizedFace(primaryFace)
+            handler.post {
+                if (isIntruderPresent) {
+                    privacyShieldView?.visibility = View.VISIBLE
+                    updateNotification("Intruder Shield ACTIVE!")
+                }
+            }
+        }
+
+        // 3. Sleep / Drowsiness Detection
+        val leftOpen = primaryFace.leftEyeOpenProbability ?: 1.0f
+        val rightOpen = primaryFace.rightEyeOpenProbability ?: 1.0f
+
+        if (leftOpen < 0.25f && rightOpen < 0.25f) {
+            consecutiveSleepChecks++
+            if (consecutiveSleepChecks >= 2) {
+                handleSleepDetected()
+            }
+        } else {
+            consecutiveSleepChecks = 0
+            stopAlarm()
+            updateNotification("Active: User awake and studying.")
+        }
+    }
+
+    private fun calibrateFaceProfile(face: Face) {
+        val bounds = face.boundingBox
+        val ratio = bounds.width().toFloat() / bounds.height().toFloat()
+
+        val leftEye = face.getLandmark(FaceLandmark.LEFT_EYE)?.position
+        val rightEye = face.getLandmark(FaceLandmark.RIGHT_EYE)?.position
+
+        var eyeDistRatio = 0f
+        if (leftEye != null && rightEye != null) {
+            val dist = hypot((leftEye.x - rightEye.x).toDouble(), (leftEye.y - rightEye.y).toDouble()).toFloat()
+            eyeDistRatio = dist / bounds.width().toFloat()
+        }
+
+        prefs.edit()
+            .putFloat("PROFILE_RATIO", ratio)
+            .putFloat("PROFILE_EYE_RATIO", eyeDistRatio)
+            .putBoolean("PROFILE_SAVED", true)
+            .apply()
+    }
+
+    private fun isRecognizedFace(face: Face): Boolean {
+        if (!prefs.getBoolean("PROFILE_SAVED", false)) return true // Pass through if not calibrated yet
+
+        val savedRatio = prefs.getFloat("PROFILE_RATIO", 0f)
+        val bounds = face.boundingBox
+        val currentRatio = bounds.width().toFloat() / bounds.height().toFloat()
+
+        // Verify bounding ratio tolerance within 25%
+        return abs(currentRatio - savedRatio) <= 0.25f
+    }
+
+    private fun handleSleepDetected() {
+        val soundAlarm = prefs.getBoolean("ENABLE_ALARM", true)
+        if (soundAlarm) {
+            updateNotification("DROWSINESS DETECTED! Waking up...")
+            playAlarm()
+        } else {
+            updateNotification("Sleep detected: Powering display down.")
+            releaseWakeLock()
+        }
+    }
+
+    private fun playAlarm() {
+        try {
+            if (ringtone == null) {
+                val alarmUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+                    ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                ringtone = RingtoneManager.getRingtone(applicationContext, alarmUri)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                    ringtone?.audioAttributes = AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_ALARM)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .build()
+                }
+            }
+            if (ringtone?.isPlaying == false) {
+                ringtone?.play()
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun stopAlarm() {
+        try {
+            if (ringtone?.isPlaying == true) {
+                ringtone?.stop()
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun updateNotification(text: String) {
         try {
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            nm.notify(1, buildNotification(statusText))
+            nm.notify(1, buildNotification(text))
         } catch (_: Exception) {}
     }
 
@@ -325,10 +593,10 @@ class KeepAwakeService : LifecycleService() {
         val channelId = "study_awake_channel"
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(channelId, "StudyAwake Service", NotificationManager.IMPORTANCE_LOW)
+            val channel = NotificationChannel(channelId, "StudyAwake Engine", NotificationManager.IMPORTANCE_LOW)
             nm.createNotificationChannel(channel)
             return Notification.Builder(this, channelId)
-                .setContentTitle("StudyAwake Assignment Mode")
+                .setContentTitle("StudyAwake Active")
                 .setContentText(text)
                 .setSmallIcon(android.R.drawable.ic_menu_camera)
                 .setOngoing(true)
@@ -336,7 +604,7 @@ class KeepAwakeService : LifecycleService() {
         }
         @Suppress("DEPRECATION")
         return Notification.Builder(this)
-            .setContentTitle("StudyAwake Assignment Mode")
+            .setContentTitle("StudyAwake Active")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setOngoing(true)
@@ -344,9 +612,52 @@ class KeepAwakeService : LifecycleService() {
     }
 
     override fun onDestroy() {
+        isRunning = false
+        stopAlarm()
         handler.removeCallbacks(checkRunnable)
         releaseWakeLock()
+
+        try {
+            if (overlayFilterView != null) {
+                windowManager?.removeView(overlayFilterView)
+                overlayFilterView = null
+            }
+            if (privacyShieldView != null) {
+                windowManager?.removeView(privacyShieldView)
+                privacyShieldView = null
+            }
+        } catch (_: Exception) {}
+
         cameraExecutor.shutdown()
         super.onDestroy()
+    }
+}
+
+class StudyAwakeTileService : TileService() {
+    override fun onStartListening() {
+        super.onStartListening()
+        val tile = qsTile ?: return
+        tile.state = if (KeepAwakeService.isRunning) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
+        tile.updateTile()
+    }
+
+    override fun onClick() {
+        super.onClick()
+        val tile = qsTile ?: return
+        if (KeepAwakeService.isRunning) {
+            stopService(Intent(this, KeepAwakeService::class.java))
+            tile.state = Tile.STATE_INACTIVE
+        } else {
+            val intent = Intent(this, KeepAwakeService::class.java).apply {
+                putExtra("INTERVAL", 20000L)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
+            tile.state = Tile.STATE_ACTIVE
+        }
+        tile.updateTile()
     }
 }
