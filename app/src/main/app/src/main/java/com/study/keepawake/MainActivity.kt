@@ -47,10 +47,28 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences("StudyAwakePrefs", Context.MODE_PRIVATE)
 
+        // BULLETPROOF CRASH CATCHER: Saves error to memory and exits safely
         Thread.setDefaultUncaughtExceptionHandler { _, throwable ->
-            Looper.prepare()
-            Toast.makeText(applicationContext, "Crash Error: ${throwable.message}", Toast.LENGTH_LONG).show()
-            Looper.loop()
+            prefs.edit().putString("CRASH_LOG", throwable.stackTraceToString()).commit()
+            Runtime.getRuntime().exit(1)
+        }
+
+        // Check if we crashed on the last run and show it
+        val lastCrash = prefs.getString("CRASH_LOG", null)
+        if (lastCrash != null) {
+            val errView = TextView(this).apply {
+                text = "PREVIOUS CRASH LOG:\n\n$lastCrash"
+                setTextColor(Color.parseColor("#FF5252"))
+                setBackgroundColor(Color.BLACK)
+                setPadding(40, 40, 40, 40)
+                isScrollContainer = true
+            }
+            val scroll = ScrollView(this).apply { addView(errView) }
+            setContentView(scroll)
+            
+            // Clear it so it doesn't show forever
+            prefs.edit().remove("CRASH_LOG").apply()
+            return
         }
 
         try {
@@ -100,8 +118,8 @@ class MainActivity : Activity() {
                 })
             }
 
-            // Toggles
-            val warmSwitch = Switch(this).apply {
+            // Using CheckBox instead of Switch to prevent Samsung One UI crashes
+            val warmSwitch = CheckBox(this).apply {
                 text = "Dynamic Ambient Warmth & Dim"
                 setTextColor(Color.WHITE)
                 isChecked = prefs.getBoolean("ENABLE_WARMTH", true)
@@ -110,7 +128,7 @@ class MainActivity : Activity() {
                 }
             }
 
-            val privacySwitch = Switch(this).apply {
+            val privacySwitch = CheckBox(this).apply {
                 text = "Intruder Screen Saver Shield"
                 setTextColor(Color.WHITE)
                 isChecked = prefs.getBoolean("ENABLE_PRIVACY", false)
@@ -127,7 +145,7 @@ class MainActivity : Activity() {
                 }
             }
 
-            val alarmSwitch = Switch(this).apply {
+            val alarmSwitch = CheckBox(this).apply {
                 text = "Sleep Detection: Sound Alarm"
                 setTextColor(Color.WHITE)
                 isChecked = prefs.getBoolean("ENABLE_ALARM", true)
@@ -188,9 +206,9 @@ class MainActivity : Activity() {
 
             if (!hasPermissions()) requestAppPermissions()
 
-        } catch (e: Exception) {
+        } catch (t: Throwable) {
             val errView = TextView(this).apply {
-                text = "Startup Error:\n${e.stackTraceToString()}"
+                text = "Startup Error:\n${t.stackTraceToString()}"
                 setTextColor(Color.WHITE)
                 setBackgroundColor(Color.BLACK)
                 setPadding(40, 40, 40, 40)
@@ -392,7 +410,6 @@ class KeepAwakeService : LifecycleService() {
                     if (mediaImage != null) {
                         analyzed = true
 
-                        // 1. Calculate Ambient Room Illuminance (Luma Y-Plane)
                         val yPlane = mediaImage.planes[0].buffer
                         val ambientLuma = calculateAverageLuma(yPlane, mediaImage.width, mediaImage.height)
                         handler.post { applyAmbientDisplayAdjustment(ambientLuma) }
@@ -423,7 +440,7 @@ class KeepAwakeService : LifecycleService() {
         buffer.rewind()
         var sum = 0L
         var count = 0
-        val step = 16 // Sub-sample every 16th pixel to maintain 0ms latency
+        val step = 16 
         val limit = buffer.remaining()
         var i = 0
         while (i < limit) {
@@ -439,13 +456,11 @@ class KeepAwakeService : LifecycleService() {
             overlayFilterView?.setBackgroundColor(Color.TRANSPARENT)
             return
         }
-
-        // Color coding: #AARRGGBB
         val filterColor = when {
-            luma < 45 -> Color.argb(85, 255, 140, 0)   // Dark room: Heavy Amber Warmth + software dim
-            luma < 120 -> Color.argb(40, 255, 165, 0)  // Medium room: Balanced Warmth
-            luma < 190 -> Color.TRANSPARENT             // Well-lit: Clear
-            else -> Color.argb(20, 0, 0, 0)             // Extreme glare: Sub-tint clear
+            luma < 45 -> Color.argb(85, 255, 140, 0)
+            luma < 120 -> Color.argb(40, 255, 165, 0)
+            luma < 190 -> Color.TRANSPARENT
+            else -> Color.argb(20, 0, 0, 0)
         }
         overlayFilterView?.setBackgroundColor(filterColor)
     }
@@ -457,7 +472,6 @@ class KeepAwakeService : LifecycleService() {
             stopAlarm()
             releaseWakeLock()
 
-            // Progressive Battery Saver
             if (missedDetections >= 62) {
                 checkIntervalMs = 60 * 60 * 1000L
                 updateNotification("Away a long time. Next check in 1 hr.")
@@ -471,21 +485,18 @@ class KeepAwakeService : LifecycleService() {
             return
         }
 
-        // Reset presence timers
         missedDetections = 0
         checkIntervalMs = baseIntervalMs
         acquireWakeLock()
 
         val primaryFace = faces[0]
 
-        // Calibration Trigger Check
         if (prefs.getBoolean("TRIGGER_CALIBRATE", false)) {
             calibrateFaceProfile(primaryFace)
             prefs.edit().putBoolean("TRIGGER_CALIBRATE", false).apply()
             handler.post { Toast.makeText(this, "Face calibration saved!", Toast.LENGTH_SHORT).show() }
         }
 
-        // 2. Intruder Detection / Multiple Face Protection
         val privacyEnabled = prefs.getBoolean("ENABLE_PRIVACY", false)
         if (privacyEnabled) {
             val isIntruderPresent = faces.size > 1 || !isRecognizedFace(primaryFace)
@@ -497,7 +508,6 @@ class KeepAwakeService : LifecycleService() {
             }
         }
 
-        // 3. Sleep / Drowsiness Detection
         val leftOpen = primaryFace.leftEyeOpenProbability ?: 1.0f
         val rightOpen = primaryFace.rightEyeOpenProbability ?: 1.0f
 
@@ -534,13 +544,10 @@ class KeepAwakeService : LifecycleService() {
     }
 
     private fun isRecognizedFace(face: Face): Boolean {
-        if (!prefs.getBoolean("PROFILE_SAVED", false)) return true // Pass through if not calibrated yet
-
+        if (!prefs.getBoolean("PROFILE_SAVED", false)) return true 
         val savedRatio = prefs.getFloat("PROFILE_RATIO", 0f)
         val bounds = face.boundingBox
         val currentRatio = bounds.width().toFloat() / bounds.height().toFloat()
-
-        // Verify bounding ratio tolerance within 25%
         return abs(currentRatio - savedRatio) <= 0.25f
     }
 
